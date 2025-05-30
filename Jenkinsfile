@@ -4,7 +4,7 @@ pipeline {
     environment {
         DOCKER_BINARY = '/opt/homebrew/bin/docker'
         DOCKER_HOST = 'unix:///Users/eniolaabraham/.docker/run/docker.sock'
-        BUILD_TAG = "calculator-app:${env.BUILD_NUMBER}"
+        BUILD_TAG = "calculator-app:${BUILD_NUMBER}"
         KUBE_NAMESPACE = 'calculator-ns'
     }
 
@@ -12,13 +12,13 @@ pipeline {
         stage('Verify Environment') {
             steps {
                 script {
-                    sh """
+                    sh '''
                         echo "### SYSTEM INFO ###"
-                        echo "PATH: ${PATH}"
-                        echo "Docker path: ${DOCKER_BINARY}"
-                        echo "Docker version: $(${DOCKER_BINARY} --version || echo 'Not available')"
-                        echo "Kubectl version: $(kubectl version --short 2>/dev/null || echo 'Not available')"
-                    """
+                        echo "PATH: $PATH"
+                        echo "Docker path: ''' + DOCKER_BINARY + '''"
+                        echo "Docker version: $(''' + DOCKER_BINARY + ''' --version || echo "Not available")"
+                        echo "Kubectl version: $(kubectl version --short 2>/dev/null || echo "Not available")"
+                    '''
                 }
             }
         }
@@ -68,18 +68,18 @@ pipeline {
                 script {
                     try {
                         sh """
-                            ${DOCKER_BINARY} build \
-                                --no-cache \
-                                --build-arg BUILD_NUMBER=${env.BUILD_NUMBER} \
+                            ${DOCKER_BINARY} build \\
+                                --no-cache \\
+                                --build-arg BUILD_NUMBER=${BUILD_NUMBER} \\
                                 -t ${BUILD_TAG} .
                         """
                     } catch (Exception e) {
                         echo "Build failed, retrying with network host..."
                         sh """
-                            ${DOCKER_BINARY} build \
-                                --network host \
-                                --no-cache \
-                                --build-arg BUILD_NUMBER=${env.BUILD_NUMBER} \
+                            ${DOCKER_BINARY} build \\
+                                --network host \\
+                                --no-cache \\
+                                --build-arg BUILD_NUMBER=${BUILD_NUMBER} \\
                                 -t ${BUILD_TAG} .
                         """
                     }
