@@ -2,147 +2,208 @@ pipeline {
     agent any
     
     environment {
-        DOCKER_BINARY = '/opt/homebrew/bin/docker'
-        DOCKER_HOST = 'unix:///Users/eniolaabraham/.docker/run/docker.sock'
-        BUILD_TAG = "calculator-app:${BUILD_NUMBER}"
-        KUBE_NAMESPACE = 'calculator-ns'
+        DOCKER_REGISTRY = 'localhost:5000'  // Change to your registry
+        IMAGE_NAME = 'calculator-app'
+        BUILD_NUMBER = "${env.BUILD_NUMBER}"
+        KUBECONFIG = '/var/jenkins_home/.kube/config'  // Path to your kubeconfig
     }
-
+    
     stages {
-        stage('Verify Environment') {
+        stage('Checkout') {
             steps {
-                script {
-                    sh '''
-                        echo "### SYSTEM INFO ###"
-                        echo "PATH: $PATH"
-                        echo "Docker path: ''' + DOCKER_BINARY + '''"
-                        echo "Docker version: $(''' + DOCKER_BINARY + ''' --version || echo "Not available")"
-                        echo "Kubectl version: $(kubectl version --short 2>/dev/null || echo "Not available")"
-                    '''
-                }
+                echo "### Checking out code ###"
+                checkout scm
             }
         }
-
-        stage('Start Docker') {
+        
+        stage('Build Docker Image') {
             steps {
                 script {
-                    sh """
-                        # Check if Docker is running
-                        if ! ${DOCKER_BINARY} ps &>/dev/null; then
-                            echo "Starting Docker Desktop..."
-                            open -a Docker
-                            # Wait with increasing timeout
-                            for i in {1..6}; do
-                                sleep 10
-                                if ${DOCKER_BINARY} ps &>/dev/null; then
-                                    echo "Docker started after \$((i*10)) seconds"
-                                    break
-                                fi
-                                if [ \$i -eq 6 ]; then
-                                    echo "ERROR: Docker failed to start after 60 seconds"
-                                    exit 1
-                                fi
-                            done
-                        fi
-                    """
-                }
-            }
-        }
-
-        stage('Configure Docker') {
-            steps {
-                sh """
-                    # Clean up any existing credentials configuration
-                    mkdir -p ~/.docker
-                    echo '{"credsStore":""}' > ~/.docker/config.json
-                    chmod 600 ~/.docker/config.json
+                    echo "### Building Docker image ###"
+                    def image = docker.build("${DOCKER_REGISTRY}/${IMAGE_NAME}:${BUILD_NUMBER}")
                     
-                    # Verify Docker can pull images
-                    ${DOCKER_BINARY} pull tomcat:9.0-jdk11 || echo "Warning: Failed to pull Tomcat image"
-                """
-            }
-        }
-
-        stage('Build Image') {
-            steps {
-                script {
-                    try {
-                        sh """
-                            ${DOCKER_BINARY} build \\
-                                --no-cache \\
-                                --build-arg BUILD_NUMBER=${BUILD_NUMBER} \\
-                                -t ${BUILD_TAG} .
-                        """
-                    } catch (Exception e) {
-                        echo "Build failed, retrying with network host..."
-                        sh """
-                            ${DOCKER_BINARY} build \\
-                                --network host \\
-                                --no-cache \\
-                                --build-arg BUILD_NUMBER=${BUILD_NUMBER} \\
-                                -t ${BUILD_TAG} .
-                        """
-                    }
+                    // Also tag as latest
+                    sh "docker tag ${DOCKER_REGISTRY}/${IMAGE_NAME}:${BUILD_NUMBER} ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest"
+                    
+                    echo "### Image built successfully ###"
                 }
             }
         }
         
         stage('Push Image') {
             when {
-                expression { env.BRANCH_NAME == 'project-3' }
+                anyOf {
+                    branch 'main'
+                    branch 'master'
+                    branch 'project-3'
+                }
             }
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'docker-hub-creds',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
-                )]) {
-                    sh """
-                        ${DOCKER_BINARY} login -u $DOCKER_USER -p $DOCKER_PASS
-                        ${DOCKER_BINARY} push ${BUILD_TAG}
-                    """
+                script {
+                    echo "### Pushing image to registry ###"
+                    sh "docker push ${DOCKER_REGISTRY}/${IMAGE_NAME}:${BUILD_NUMBER}"
+                    sh "docker push ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest"
                 }
             }
         }
-
-        stage('Kubernetes Deploy') {
+        
+        stage('Check kubectl') {
             steps {
                 script {
-                    sh """
-                        # Create namespace if not exists
-                        kubectl create namespace ${KUBE_NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
+                    echo "### Checking kubectl installation ###"
+                    sh '''
+                        if ! command -v kubectl &> /dev/null; then
+                            echo "kubectl not found. Installing..."
+                            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                            chmod +x kubectl
+                            sudo mv kubectl /usr/local/bin/ || mv kubectl /tmp/
+                            export PATH="/tmp:$PATH"
+                        fi
+                        kubectl version --client
+                    '''
+                }
+            }
+        }
+        
+        stage('Kubernetes Deploy') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'master'
+                    branch 'project-3'
+                }
+            }
+            steps {
+                script {
+                    echo "### Deploying to Kubernetes ###"
+                    
+                    // Create namespace
+                    sh '''
+                        kubectl create namespace calculator-ns --dry-run=client -o yaml | kubectl apply -f -
+                    '''
+                    
+                    // Create deployment
+                    sh '''
+                        cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: calculator-app
+  namespace: calculator-ns
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: calculator-app
+  template:
+    metadata:
+      labels:
+        app: calculator-app
+    spec:
+      containers:
+      - name: calculator-app
+        image: ${DOCKER_REGISTRY}/${IMAGE_NAME}:${BUILD_NUMBER}
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - calculator-app
+              topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: calculator-service
+  namespace: calculator-ns
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+  selector:
+    app: calculator-app
+EOF
+                    '''
+                    
+                    // Wait for deployment
+                    sh 'kubectl rollout status deployment/calculator-app -n calculator-ns --timeout=300s'
+                    
+                    // Get service info
+                    sh 'kubectl get services -n calculator-ns'
+                }
+            }
+        }
+        
+        stage('Verify Deployment') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'master'
+                    branch 'project-3'
+                }
+            }
+            steps {
+                script {
+                    echo "### Verifying deployment ###"
+                    sh '''
+                        echo "Pods in calculator-ns:"
+                        kubectl get pods -n calculator-ns
                         
-                        # Deploy application
-                        kubectl config set-context --current --namespace=${KUBE_NAMESPACE}
-                        kubectl apply -f k8s/
+                        echo "Services in calculator-ns:"
+                        kubectl get svc -n calculator-ns
                         
-                        # Wait for rollout
-                        kubectl rollout status deployment/calculator-app --timeout=120s
-                        
-                        # Get LB URL
-                        echo "Application URL:"
-                        kubectl get service calculator-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
-                    """
+                        echo "Deployment status:"
+                        kubectl get deployment calculator-app -n calculator-ns
+                    '''
                 }
             }
         }
     }
-
+    
     post {
         always {
             echo "### Pipeline completed ###"
-            sh "${DOCKER_BINARY} images | grep calculator-app"
+            sh '''
+                docker images | grep calculator-app || echo "No calculator-app images found"
+            '''
         }
         success {
-            echo "Deployment successful!"
+            echo "### Pipeline succeeded! ###"
+            script {
+                sh '''
+                    echo "Application deployed successfully!"
+                    if kubectl get svc calculator-service -n calculator-ns &> /dev/null; then
+                        echo "Service URL:"
+                        kubectl get svc calculator-service -n calculator-ns -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || echo "LoadBalancer IP pending..."
+                    fi
+                '''
+            }
         }
         failure {
             echo "Pipeline failed - checking logs..."
-            sh """
-                ${DOCKER_BINARY} ps -a
-                kubectl get pods -n ${KUBE_NAMESPACE}
-                kubectl describe deployment/calculator-app -n ${KUBE_NAMESPACE}
-            """
+            sh '''
+                docker ps -a
+                if command -v kubectl &> /dev/null; then
+                    kubectl get pods -n calculator-ns || echo "No pods found"
+                    kubectl logs -n calculator-ns -l app=calculator-app --tail=50 || echo "No logs available"
+                fi
+            '''
         }
     }
 }
