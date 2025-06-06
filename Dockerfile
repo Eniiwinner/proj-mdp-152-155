@@ -1,11 +1,13 @@
-# First stage: Build the application with Maven
-FROM maven:3.8.4-openjdk-11 AS builder
+# Build stage
+FROM maven:3.8.6-openjdk-11 AS build
 WORKDIR /app
-COPY . .
-RUN mvn clean package
+COPY pom.xml .
+RUN mvn dependency:go-offline
+COPY src ./src
+RUN mvn package -DskipTests
 
-# Second stage: Setup Tomcat and deploy the application
-FROM tomcat:9.0-jdk11
-COPY --from=builder /app/target/WebAppCal-1.3.5.war /usr/local/tomcat/webapps/calculator.war
+# Run stage
+FROM tomcat:9.0-jre11
+COPY --from=build /app/target/*.war /usr/local/tomcat/webapps/ROOT.war
 EXPOSE 8080
 CMD ["catalina.sh", "run"]
